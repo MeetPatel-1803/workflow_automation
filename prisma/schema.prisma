@@ -1,0 +1,131 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Organization {
+  id         String              @id @default(uuid())
+  name       String              @unique
+  createdAt  DateTime            @default(now())
+  users      User[]
+  workflows  Workflow[]
+  executions WorkflowExecution[]
+}
+
+model User {
+  id             String       @id @default(uuid())
+  email          String       @unique
+  passwordHash   String
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  createdAt      DateTime     @default(now())
+
+  @@index([organizationId])
+}
+
+model Workflow {
+  id             String       @id @default(uuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  name           String
+  steps          Json // validated StepDto[] at the API layer, stored as JSONB — see README "Technical Decisions"
+  // sha256 of the canonicalized { name, steps }, enforcing "no identical
+  // workflow (same name + same steps) twice in the same org" — see README
+  // "Duplicate workflow detection".
+  contentHash    String
+  webhookKey     String       @unique @default(uuid())
+  createdById    String
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  executions WorkflowExecution[]
+
+  @@index([organizationId])
+  @@unique([organizationId, contentHash])
+}
+
+enum ExecutionStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+enum StepExecutionStatus {
+  PENDING
+  RUNNING
+  WAITING // delay step, parked awaiting resumeAt
+  RETRYING
+  COMPLETED
+  FAILED
+}
+
+model WorkflowExecution {
+  id             String   @id @default(uuid())
+  workflowId     String
+  workflow       Workflow @relation(fields: [workflowId], references: [id])
+  // Denormalized from workflow at creation time: avoids a join on every
+  // tenant-scoped lookup (GET /executions/:id checks organizationId right on
+  // this row), and locks in the organization at the moment of execution even
+  // if workflow reassignment across orgs were ever allowed later (it isn't,
+  // and won't be — workflows are immutable — but this column's correctness
+  // doesn't depend on that staying true).
+  organizationId String
+  // Relation exists so Organization.executions can be declared; the actual
+  // tenant-scoped lookup in ExecutionsService still filters on the plain
+  // `organizationId` column directly, never by traversing this relation or
+  // through Workflow — that's the whole point of denormalizing it here.
+  organization   Organization    @relation(fields: [organizationId], references: [id])
+  status         ExecutionStatus @default(PENDING)
+  currentStepId  String? // the user-facing step `id` (Workflow.steps[].id), not a DB PK
+  startedAt      DateTime?
+  completedAt    DateTime?
+  error          String?
+  createdAt      DateTime @default(now())
+
+  stepExecutions    StepExecution[]
+  idempotencyRecord IdempotencyRecord?
+
+  @@index([organizationId])
+  @@index([status]) // for reconciliation/monitoring queries
+  @@index([workflowId])
+}
+
+model StepExecution {
+  id          String            @id @default(uuid())
+  executionId String
+  execution   WorkflowExecution @relation(fields: [executionId], references: [id])
+  stepId      String // matches Workflow.steps[].id
+  stepType    String // denormalized copy of the step's type
+  attempt     Int                 @default(1)
+  status      StepExecutionStatus @default(PENDING)
+  input       Json? // relevant prior-step output fed to this step, for debugging
+  output      Json? // this step's result (e.g. http response, condition result)
+  error       String?
+  resumeAt    DateTime? // only set for delay steps — reconciliation reads this
+  startedAt   DateTime?
+  completedAt DateTime?
+
+  // Idempotent write target: an attempted duplicate write for the same
+  // attempt is a DB-level conflict, not a silent double-row.
+  @@unique([executionId, stepId, attempt])
+  @@index([executionId])
+  @@index([status, resumeAt]) // reconciliation job scans WAITING rows whose resumeAt has passed
+}
+
+model IdempotencyRecord {
+  id             String            @id @default(uuid())
+  organizationId String
+  key            String
+  executionId    String            @unique
+  execution      WorkflowExecution @relation(fields: [executionId], references: [id])
+  createdAt      DateTime          @default(now())
+
+  // THE constraint that actually enforces idempotency under concurrent
+  // requests — see README "How idempotency works".
+  @@unique([organizationId, key])
+}
