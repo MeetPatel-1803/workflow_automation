@@ -23,7 +23,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
     ports:
-      - '5432:5432'
+      - '5436:5432'
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -98,7 +98,7 @@ services:
       POSTGRES_PASSWORD: workflow
       POSTGRES_DB: workflow_test
     ports:
-      - '5433:5432'
+      - '5435:5432'
     tmpfs:
       - /var/lib/postgresql/data
     healthcheck:
